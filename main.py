@@ -162,4 +162,7 @@ def run_schedule():
 if __name__ == '__main__':
     thread = threading.Thread(target=run_schedule, daemon=True)
     thread.start()
-    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)))
+    port = int(os.getenv('PORT', 5000))
+    print(f"[INFO] Flask запускается на порту {port}")
+    app.run(host='0.0.0.0', port=port)
+
