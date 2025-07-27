@@ -1,18 +1,25 @@
+import os
+import json
+import threading
+import time
+from datetime import datetime
+from flask import Flask, request, abort
 import requests
 from bs4 import BeautifulSoup
 from telegram import Bot
 import schedule
-import time
-import json
-import os
-from datetime import datetime
 
-BOT_TOKEN = '8171740332:AAHIYTYe90qF2dIaArTR3j0vFi8pQLWG2wA'
-CHANNEL_ID = -1002700825929  
-URL = 'https://it.tlscontact.com/by/MSQ/page.php?pid=news'
-JSON_FILE = 'seen_posts.json'
+app = Flask(__name__)
+
+BOT_TOKEN = os.getenv('TELEGRAM_TOKEN')
+CHANNEL_ID = int(os.getenv('CHANNEL_ID'))  # например -1001234567890
+
+if not BOT_TOKEN or not CHANNEL_ID:
+    raise RuntimeError("TELEGRAM_TOKEN и CHANNEL_ID должны быть установлены в env")
 
 bot = Bot(token=BOT_TOKEN)
+JSON_FILE = 'seen_posts.json'
+URL = 'https://it.tlscontact.com/by/MSQ/page.php?pid=news'
 
 def parse_date(date_str):
     clean_date = date_str.replace(' ', '').lower()
@@ -37,16 +44,10 @@ def load_seen_posts():
     return []
 
 def save_seen_posts(posts):
-    # Фильтруем посты с валидной датой
     posts_with_dates = [p for p in posts if parse_date(p['date']) is not None]
     posts_without_dates = [p for p in posts if parse_date(p['date']) is None]
-
-    # Сортируем только с валидной датой
     posts_with_dates.sort(key=lambda p: parse_date(p['date']), reverse=True)
-
-    # Объединяем, чтобы вверху были новости с датой, а внизу без даты
     sorted_posts = posts_with_dates + posts_without_dates
-
     with open(JSON_FILE, 'w', encoding='utf-8') as f:
         json.dump(sorted_posts, f, ensure_ascii=False, indent=2)
 
@@ -54,60 +55,41 @@ seen_posts = load_seen_posts()
 seen_ids = set(p['id'] for p in seen_posts)
 
 def fetch_news(send_last_only=False):
+    global seen_posts, seen_ids
     try:
         print("Checking news...")
         response = requests.get(URL, timeout=10)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
-
         headings = soup.find_all('h3', class_='mb-0')
         if not headings:
             print("No news found on the page.")
             return
 
         all_news = []
-
         for h3 in headings:
             title = h3.get_text(strip=True)
-
             parent_div = h3.find_parent('div', class_='d-flex')
             if not parent_div:
                 continue
-
             date_p = parent_div.find_next_sibling('p')
-            if date_p:
-                date_strong = date_p.find('strong')
-                date = date_strong.get_text(strip=True) if date_strong else ''
-            else:
-                date = ''
-
+            date = date_p.find('strong').get_text(strip=True) if date_p and date_p.find('strong') else ''
             desc_p = date_p.find_next_sibling('p') if date_p else None
             description = desc_p.get_text(strip=True) if desc_p else ''
-
             unique_id = f"{title}||{date}"
+            all_news.append({'id': unique_id, 'title': title, 'date': date, 'description': description})
 
-            all_news.append({
-                'id': unique_id,
-                'title': title,
-                'date': date,
-                'description': description
-            })
-
-        # Фильтруем новости с валидной датой для сортировки
         valid_news = [n for n in all_news if parse_date(n['date']) is not None]
         invalid_news = [n for n in all_news if parse_date(n['date']) is None]
-
         valid_news.sort(key=lambda n: parse_date(n['date']), reverse=True)
         all_news = valid_news + invalid_news
 
         if send_last_only:
-            global seen_posts, seen_ids
             if not seen_posts:
                 seen_posts = all_news.copy()
                 seen_ids = set(p['id'] for p in seen_posts)
                 save_seen_posts(seen_posts)
                 print("Initialized seen_posts with existing news.")
-
             if all_news:
                 last = all_news[0]
                 msg = f"*{last['title']}*\n_{last['date']}_\n\n{last['description']}"
@@ -133,14 +115,24 @@ def fetch_news(send_last_only=False):
     except Exception as e:
         print(f"[Error] Cannot get news: {e}")
 
-# При запуске отправляем последнюю новость (для проверки работы)
-fetch_news(send_last_only=True)
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    # Здесь можно обработать входящие обновления, если нужно
+    update = request.get_json(force=True)
+    print("Received update:", update)
+    return 'OK'
 
-print("Bot started. Waiting for news...")
+def run_schedule():
+    schedule.every(5).minutes.do(fetch_news)
+    # Отправляем последнюю новость при старте
+    fetch_news(send_last_only=True)
+    while True:
+        schedule.run_pending()
+        time.sleep(1)
 
-# Проверяем новые новости каждые 15 секунд (для теста, потом можно увеличить)
-schedule.every(5).minutes.do(fetch_news)
-
-while True:
-    schedule.run_pending()
-    time.sleep(1)
+if __name__ == '__main__':
+    # Запускаем планировщик в отдельном потоке, чтобы Flask сервер не блокировался
+    thread = threading.Thread(target=run_schedule, daemon=True)
+    thread.start()
+    # Запускаем Flask
+    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)))
