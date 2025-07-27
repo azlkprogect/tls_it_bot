@@ -6,20 +6,23 @@ from datetime import datetime
 from flask import Flask, request, abort
 import requests
 from bs4 import BeautifulSoup
-from telegram import Bot
+from telegram import Bot, Update
+from telegram.ext import Dispatcher, CommandHandler
 import schedule
 
 app = Flask(__name__)
 
 BOT_TOKEN = os.getenv('TELEGRAM_TOKEN')
-CHANNEL_ID = int(os.getenv('CHANNEL_ID'))  # например -1001234567890
+CHANNEL_ID = int(os.getenv('CHANNEL_ID'))
 
 if not BOT_TOKEN or not CHANNEL_ID:
-    raise RuntimeError("TELEGRAM_TOKEN и CHANNEL_ID должны быть установлены в env")
+    raise RuntimeError("TELEGRAM_TOKEN and CHANNEL_ID must be set in environment variables")
 
 bot = Bot(token=BOT_TOKEN)
 JSON_FILE = 'seen_posts.json'
 URL = 'https://it.tlscontact.com/by/MSQ/page.php?pid=news'
+
+last_check_time = None
 
 def parse_date(date_str):
     clean_date = date_str.replace(' ', '').lower()
@@ -55,7 +58,7 @@ seen_posts = load_seen_posts()
 seen_ids = set(p['id'] for p in seen_posts)
 
 def fetch_news(send_last_only=False):
-    global seen_posts, seen_ids
+    global seen_posts, seen_ids, last_check_time
     try:
         print("Checking news...")
         response = requests.get(URL, timeout=10)
@@ -83,6 +86,8 @@ def fetch_news(send_last_only=False):
         invalid_news = [n for n in all_news if parse_date(n['date']) is None]
         valid_news.sort(key=lambda n: parse_date(n['date']), reverse=True)
         all_news = valid_news + invalid_news
+
+        last_check_time = datetime.now()
 
         if send_last_only:
             if not seen_posts:
@@ -115,24 +120,46 @@ def fetch_news(send_last_only=False):
     except Exception as e:
         print(f"[Error] Cannot get news: {e}")
 
+def check_command(update, context):
+    update.message.reply_text("Bot is running")
+
+def lastnew_command(update, context):
+    if seen_posts:
+        last = seen_posts[-1]
+        date_str = last_check_time.strftime("%Y-%m-%d %H:%M:%S") if last_check_time else "unknown"
+        msg = (
+            f"*Last news:*\n"
+            f"{last['title']}\n"
+            f"News date: {last['date']}\n\n"
+            f"Last check time: {date_str}"
+        )
+        update.message.reply_text(msg, parse_mode='Markdown')
+    else:
+        update.message.reply_text("No news available yet")
+
+from telegram.ext import Dispatcher
+
+dispatcher = Dispatcher(bot, None, workers=0)
+dispatcher.add_handler(CommandHandler("check", check_command))
+dispatcher.add_handler(CommandHandler("lastnew", lastnew_command))
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    # Здесь можно обработать входящие обновления, если нужно
-    update = request.get_json(force=True)
-    print("Received update:", update)
-    return 'OK'
+    if request.method == "POST":
+        update = Update.de_json(request.get_json(force=True), bot)
+        dispatcher.process_update(update)
+        return 'OK'
+    else:
+        abort(403)
 
 def run_schedule():
     schedule.every(5).minutes.do(fetch_news)
-    # Отправляем последнюю новость при старте
     fetch_news(send_last_only=True)
     while True:
         schedule.run_pending()
         time.sleep(1)
 
 if __name__ == '__main__':
-    # Запускаем планировщик в отдельном потоке, чтобы Flask сервер не блокировался
     thread = threading.Thread(target=run_schedule, daemon=True)
     thread.start()
-    # Запускаем Flask
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)))
