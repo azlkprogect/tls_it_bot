@@ -7,9 +7,8 @@ import json
 import os
 from datetime import datetime
 
-# === Настройки ===
 BOT_TOKEN = '8171740332:AAHIYTYe90qF2dIaArTR3j0vFi8pQLWG2wA'
-CHANNEL_ID = -1002700825929  # Твой ID канала (число)
+CHANNEL_ID = -1002700825929  
 URL = 'https://it.tlscontact.com/by/MSQ/page.php?pid=news'
 JSON_FILE = 'seen_posts.json'
 
